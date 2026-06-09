@@ -279,6 +279,12 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN_READ }}
       - name: Set NEXT_PUBLIC_BUILD_ID
         run: echo "NEXT_PUBLIC_BUILD_ID=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+      - name: Start dependency containers in background
+        # Pulling and starting the dependency services has no dependency on
+        # the image build, so let the build overlap it. The compose up below
+        # re-validates their health.
+        run: |
+          (docker compose -f "$DOCKER_COMPOSE_FILE" up -d --wait --wait-timeout 180 postgres redis minio clickhouse > /tmp/deps-up.log 2>&1) &
       - name: Build images
         run: |
           docker compose -f "$DOCKER_COMPOSE_FILE" build --print > /tmp/bake.json
@@ -298,6 +304,8 @@ jobs:
         if: failure()
         run: |
           mkdir -p /tmp/docker-diagnostics
+
+          cp /tmp/deps-up.log /tmp/docker-diagnostics/deps-up.log || true
 
           docker compose -f "$DOCKER_COMPOSE_FILE" ps -a \
             | tee /tmp/docker-diagnostics/compose-state.txt || true
