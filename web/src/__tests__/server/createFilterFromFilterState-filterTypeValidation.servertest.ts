@@ -371,6 +371,37 @@ describe("createFilterFromFilterState filter type validation", () => {
     expect(Object.values(params)).toEqual(["source", "needle"]);
   });
 
+  it("adds ngram prefilter params for event metadata substring filters", () => {
+    const filters = [
+      {
+        column: "metadata",
+        type: "stringObject",
+        operator: "contains",
+        key: "environment",
+        value: "prod%_\\west",
+      },
+    ] satisfies EventsTableFilterState;
+
+    const [result] = createFilterFromFilterState(
+      filters,
+      [mappings.eventMetadata],
+      columnDefinitions,
+    );
+
+    const { query, params } = result.apply();
+
+    expect(query).toContain("like(arrayStringConcat(e.metadata_values),");
+    expect(query).toContain("has(e.metadata_names,");
+    expect(query).toContain(
+      "position(e.metadata_values[indexOf(e.metadata_names,",
+    );
+    expect(Object.values(params)).toEqual([
+      "environment",
+      "prod%_\\west",
+      "%prod\\%\\_\\\\west%",
+    ]);
+  });
+
   it.each([
     {
       description: "non-indexed event string column",

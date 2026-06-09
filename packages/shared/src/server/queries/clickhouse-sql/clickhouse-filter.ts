@@ -4,6 +4,7 @@ import {
   filterOperators,
 } from "../../../interfaces/filters";
 import { clickhouseCompliantRandomCharacters } from "../../repositories";
+import { escapeSqlLikePattern } from "../../utils/sqlLike";
 import {
   assertValidFtsMatchFilter,
   FTS_OPERATOR_DESCRIPTORS,
@@ -26,6 +27,10 @@ type ClickhouseFilter = {
   query: string;
   params: { [x: string]: any } | {};
 };
+
+const NGRAM_ACCELERATED_METADATA_OPERATORS = new Set<
+  (typeof filterOperators)["stringObject"][number]
+>(["contains", "starts with", "ends with"]);
 
 export class StringFilter implements Filter {
   public clickhouseTable: string;
@@ -355,6 +360,15 @@ export class StringObjectFilter implements Filter {
       const valueAccessor = `${valuesColumn}[indexOf(${namesColumn}, {${varKeyName}: String})]`;
       const hasKey = `has(${namesColumn}, {${varKeyName}: String})`;
       const valueParam = `{${varValueName}: String}`;
+      const ngramPrefilterParamName = `stringObjectNgramFilter${clickhouseCompliantRandomCharacters()}`;
+      const shouldUseNgramPrefilter =
+        this.operator !== FTS_MATCH_OPERATOR &&
+        NGRAM_ACCELERATED_METADATA_OPERATORS.has(this.operator) &&
+        this.value.length > 0;
+      const ngramPrefilter = shouldUseNgramPrefilter
+        ? `like(arrayStringConcat(${valuesColumn}), {${ngramPrefilterParamName}: String})`
+        : undefined;
+      const ngramPrefix = ngramPrefilter ? `${ngramPrefilter} AND ` : "";
 
       switch (this.operator) {
         case "=":
@@ -366,16 +380,16 @@ export class StringObjectFilter implements Filter {
           });
           break;
         case "contains":
-          query = `${hasKey} AND (position(${valueAccessor}, ${valueParam}) > 0)`;
+          query = `${ngramPrefix}${hasKey} AND (position(${valueAccessor}, ${valueParam}) > 0)`;
           break;
         case "does not contain":
           query = `${hasKey} AND (position(${valueAccessor}, ${valueParam}) = 0)`;
           break;
         case "starts with":
-          query = `${hasKey} AND (startsWith(${valueAccessor}, ${valueParam}))`;
+          query = `${ngramPrefix}${hasKey} AND (startsWith(${valueAccessor}, ${valueParam}))`;
           break;
         case "ends with":
-          query = `${hasKey} AND (endsWith(${valueAccessor}, ${valueParam}))`;
+          query = `${ngramPrefix}${hasKey} AND (endsWith(${valueAccessor}, ${valueParam}))`;
           break;
         case FTS_MATCH_OPERATOR:
           assertValidFtsMatchFilter({
@@ -395,6 +409,17 @@ export class StringObjectFilter implements Filter {
           break;
         default:
           throw new Error(`Unsupported operator: ${this.operator}`);
+      }
+
+      if (ngramPrefilter) {
+        return {
+          query,
+          params: {
+            [varKeyName]: this.key,
+            [varValueName]: this.value,
+            [ngramPrefilterParamName]: `%${escapeSqlLikePattern(this.value)}%`,
+          },
+        };
       }
     } else {
       // For observations/traces tables, use Map access: metadata[key]

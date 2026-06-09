@@ -408,6 +408,11 @@ SETTINGS
     enable_full_text_index = 1;
      -- cache_populated_by_fetch = 1; -- Not available in OSS ClickHouse
 
+-- Event metadata substring acceleration. Keep this as a post-create mutation
+-- while events tables are managed through this dev-table workflow.
+ALTER TABLE events_full ADD INDEX IF NOT EXISTS idx_fts_metadata_values_ngram arrayStringConcat(metadata_values) TYPE ngrambf_v1(4, 32000, 3, 0) GRANULARITY 1;
+ALTER TABLE events_core ADD INDEX IF NOT EXISTS idx_fts_metadata_values_ngram arrayStringConcat(metadata_values) TYPE ngrambf_v1(4, 32000, 3, 0) GRANULARITY 1;
+
 -- Materialized view to populate events_core from events_full.
 CREATE MATERIALIZED VIEW IF NOT EXISTS events_core_mv TO events_core AS
 SELECT
