@@ -24,7 +24,6 @@ env:
   # env context in jobs.<job_id>.name, so matrix jobs use matrix.node-version
   # for their display names.
   NODE_VERSION: 24
-  CLICKHOUSE_CLIENT_VERSION: "25.12.9.61"
 
   # Disable CI cache restores for fork PRs.
   #
@@ -341,14 +340,19 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - name: Install golang-migrate for Clickhouse migrations
+      - name: Install golang-migrate for Clickhouse migrations in background
+        # The download (1-25s depending on GitHub release CDN) is only needed
+        # by the "Migrate DB" step, so let the dependency setup overlap it.
         run: |
-          curl --fail --location --retry 5 --retry-delay 2 --retry-all-errors \
-            --output migrate.linux-amd64.tar.gz \
-            https://github.com/golang-migrate/migrate/releases/download/v4.19.1/migrate.linux-amd64.tar.gz
-          tar xzf migrate.linux-amd64.tar.gz
-          sudo mv migrate /usr/bin/migrate
-          which migrate
+          (
+            set -e
+            curl --fail --location --retry 5 --retry-delay 2 --retry-all-errors \
+              --output migrate.linux-amd64.tar.gz \
+              https://github.com/golang-migrate/migrate/releases/download/v4.19.1/migrate.linux-amd64.tar.gz
+            tar xzf migrate.linux-amd64.tar.gz
+            sudo mv migrate /usr/bin/migrate
+            echo 0 > /tmp/migrate-install.exit
+          ) > /tmp/migrate-install.log 2>&1 &
       - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6.0.8
         with:
           version: 11.4.0
@@ -406,29 +410,14 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-nextjs-web-${{ matrix.node-version }}-${{ hashFiles('**/pnpm-lock.yaml') }}-
             ${{ runner.os }}-nextjs-web-${{ matrix.node-version }}-
-      - name: Run dev containers
+      - name: Start dev containers in background
+        # Container startup (~15-20s) has no dependency on the build, so kick
+        # it off in the background and let the build overlap it. The runner
+        # keeps background processes alive across steps.
         run: |
-          docker compose -f docker-compose.dev${{ matrix.deploy-mode }}.yml up -d --wait --wait-timeout 180
-          docker compose ps
+          (docker compose -f docker-compose.dev${{ matrix.deploy-mode }}.yml up -d --wait --wait-timeout 180 > /tmp/compose-up.log 2>&1; echo $? > /tmp/compose-up.exit) &
         env:
           POSTGRES_VERSION: ${{ matrix.postgres-version }}
-      - name: Migrate DB
-        run: |
-          pnpm run db:migrate
-          pnpm --filter=shared ch:up
-      - name: Download and extract ClickHouse client for dev-tables setup
-        if: matrix.deploy-mode == ''
-        run: |
-          ARCH="amd64"
-          wget "https://packages.clickhouse.com/deb/pool/main/c/clickhouse/clickhouse-common-static_${CLICKHOUSE_CLIENT_VERSION}_${ARCH}.deb" -O clickhouse-client.deb
-
-          # The binary is usually located in ./usr/bin/clickhouse in the archive
-          dpkg-deb -x clickhouse-client.deb ch_client_dir
-          sudo cp ch_client_dir/usr/bin/clickhouse /usr/local/bin/
-      - name: Setup Dev Tables
-        if: matrix.deploy-mode == ''
-        run: |
-          pnpm --filter=shared ch:dev-tables
       - name: Build
         run: pnpm run build
         env:
@@ -436,6 +425,47 @@ jobs:
           # TypeScript is checked explicitly in the lint job; skip duplicate
           # Next.js type checks in test builds to reduce CI runtime.
           NEXT_IGNORE_BUILD_ERRORS: "true"
+      - name: Wait for dev containers
+        run: |
+          for _ in $(seq 1 200); do
+            [ -f /tmp/compose-up.exit ] && break
+            sleep 1
+          done
+          cat /tmp/compose-up.log || true
+          if [ ! -f /tmp/compose-up.exit ]; then
+            echo "docker compose up did not finish in time"
+            exit 1
+          fi
+          docker compose ps
+          exit "$(cat /tmp/compose-up.exit)"
+      - name: Migrate DB
+        run: |
+          for _ in $(seq 1 120); do
+            [ -f /tmp/migrate-install.exit ] && break
+            sleep 1
+          done
+          if [ ! -f /tmp/migrate-install.exit ]; then
+            echo "golang-migrate install did not finish in time"
+            cat /tmp/migrate-install.log || true
+            exit 1
+          fi
+          pnpm run db:migrate
+          pnpm --filter=shared ch:up
+      - name: Provide ClickHouse client via dev container for dev-tables setup
+        if: matrix.deploy-mode == ''
+        # The clickhouse-server container already ships the client binary, so a
+        # shim into the running container avoids re-downloading the ~300MB
+        # client package on every run.
+        run: |
+          sudo tee /usr/local/bin/clickhouse > /dev/null <<'EOF'
+          #!/bin/bash
+          exec docker exec -i langfuse-clickhouse clickhouse "$@"
+          EOF
+          sudo chmod +x /usr/local/bin/clickhouse
+      - name: Setup Dev Tables
+        if: matrix.deploy-mode == ''
+        run: |
+          pnpm --filter=shared ch:dev-tables
       - name: Start Langfuse
         run: (pnpm run start&)
         env:
@@ -451,7 +481,13 @@ jobs:
           LANGFUSE_INIT_USER_PASSWORD: "password"
       - name: run tests
         working-directory: web
-        run: npx dotenv -e ../.env.test -e ../.env -- vitest run --project server --project server-unit
+        # Server tests are mostly I/O-bound (Postgres/ClickHouse/HTTP roundtrips),
+        # so oversubscribing the 4-vCPU runner with extra workers overlaps DB
+        # waits and shortens the wall clock of this critical-path step. The
+        # CPU-bound client (jsdom) tests stay in their own invocation below:
+        # both folding them into this invocation and running them concurrently
+        # with it measured slower than a separate sequential boot.
+        run: npx dotenv -e ../.env.test -e ../.env -- vitest run --project server --project server-unit --maxWorkers=8
       - name: run test-client
         if: matrix.deploy-mode == ''
         working-directory: web
@@ -531,13 +567,17 @@ jobs:
           pnpm run db:migrate
           pnpm --filter=shared run db:seed
           pnpm run --filter=shared ch:up
-      - name: Download and extract ClickHouse client for dev-tables setup
+      - name: Provide ClickHouse client via dev container for dev-tables setup
         if: matrix.deploy-mode == ''
+        # The clickhouse-server container already ships the client binary, so a
+        # shim into the running container avoids re-downloading the ~300MB
+        # client package on every run.
         run: |
-          ARCH="amd64"
-          wget "https://packages.clickhouse.com/deb/pool/main/c/clickhouse/clickhouse-common-static_${CLICKHOUSE_CLIENT_VERSION}_${ARCH}.deb" -O clickhouse-client.deb
-          dpkg-deb -x clickhouse-client.deb ch_client_dir
-          sudo cp ch_client_dir/usr/bin/clickhouse /usr/local/bin/
+          sudo tee /usr/local/bin/clickhouse > /dev/null <<'EOF'
+          #!/bin/bash
+          exec docker exec -i langfuse-clickhouse clickhouse "$@"
+          EOF
+          sudo chmod +x /usr/local/bin/clickhouse
       - name: Setup Dev Tables
         if: matrix.deploy-mode == ''
         run: |
