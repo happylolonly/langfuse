@@ -15,6 +15,10 @@ import {
 } from "@/src/features/in-app-agent/schema";
 import { createAgUiStream } from "@/src/features/in-app-agent/server/agent";
 import {
+  sanitizeInAppAgentScreenContext,
+  type InAppAgentRunInput,
+} from "@/src/features/in-app-agent/context";
+import {
   createRun,
   ensureOwnedConversation,
   finishRun,
@@ -412,7 +416,7 @@ async function cleanupInAppAgentMcpApiKey(params: {
   });
 }
 
-type SanitizedAgentInput = AgUiRunAgentInput & {
+type SanitizedAgentInput = InAppAgentRunInput & {
   messages: [SanitizedUserMessage];
 };
 
@@ -423,6 +427,8 @@ function sanitizeAgentInput(input: AgUiRunAgentInput): SanitizedAgentInput {
     throw new InvalidRequestError("Input payload must include a user message");
   }
 
+  const context = sanitizeInAppAgentScreenContext(input.context);
+
   return {
     threadId: input.threadId,
     runId: createInAppAgentRunId(),
@@ -430,7 +436,7 @@ function sanitizeAgentInput(input: AgUiRunAgentInput): SanitizedAgentInput {
     state: null,
     messages: [{ ...lastUserMessage, id: createInAppAgentMessageId() }],
     tools: [],
-    context: input.context,
+    context,
     forwardedProps: {},
   };
 }
@@ -438,7 +444,7 @@ function sanitizeAgentInput(input: AgUiRunAgentInput): SanitizedAgentInput {
 function withConversationHistory(
   input: SanitizedAgentInput,
   conversationMessages: readonly AgUiMessage[],
-): AgUiRunAgentInput {
+): InAppAgentRunInput {
   return {
     ...input,
     messages: [...conversationMessages, ...input.messages],
