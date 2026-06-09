@@ -407,17 +407,11 @@ jobs:
           key: ${{ runner.os }}-turbo-${{ github.sha }}
           restore-keys: |
             ${{ runner.os }}-turbo-
-      - name: Cache Next.js builds
-        if: env.CI_CACHE_ALLOWED == 'true'
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # zizmor: ignore[cache-poisoning] test-only Next.js cache; not consumed by artifact publishing or release jobs
-        with:
-          path: |
-            ~/.npm
-            ${{ github.workspace }}/web/.next/cache
-          key: ${{ runner.os }}-nextjs-web-${{ matrix.node-version }}-${{ hashFiles('**/pnpm-lock.yaml') }}-${{ hashFiles('web/**/*.js', 'web/**/*.jsx', 'web/**/*.ts', 'web/**/*.tsx') }}
-          restore-keys: |
-            ${{ runner.os }}-nextjs-web-${{ matrix.node-version }}-${{ hashFiles('**/pnpm-lock.yaml') }}-
-            ${{ runner.os }}-nextjs-web-${{ matrix.node-version }}-
+      # Note: no Next.js build cache here on purpose. A/B-measured on PR
+      # #14138: restore+save cost ~30s/job while the .next/cache only cut the
+      # build by ~40s on a code change, and the Turbo cache already replays
+      # unchanged builds. Net ~zero, but ~1GB cache churn per commit evicted
+      # caches that do pay off.
       - name: Start dev containers in background
         # Container startup (~15-20s) has no dependency on the build, so kick
         # it off in the background and let the build overlap it. The runner
