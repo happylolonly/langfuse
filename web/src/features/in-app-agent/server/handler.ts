@@ -430,7 +430,7 @@ function sanitizeAgentInput(input: AgUiRunAgentInput): SanitizedAgentInput {
     state: null,
     messages: [{ ...lastUserMessage, id: createInAppAgentMessageId() }],
     tools: [],
-    context: [],
+    context: input.context,
     forwardedProps: {},
   };
 }
